@@ -321,8 +321,23 @@ public:
 
     using ToolLayout = std::unordered_map<Panel, const std::vector<ToolTree> &, ScopedEnumHash>;
 
+    struct DockPage {
+        Glib::ustring iconName;
+        Glib::ustring id;
+        Glib::ustring label;
+        Glib::ustring tooltip;
+        Gtk::Widget* page;
+        bool extraRef;
+    };
+
     CoarsePanel* coarse;
     Gtk::Notebook* toolPanelNotebook;
+
+    // Removes the correction-group pages from the side notebook so the editor
+    // can show them from the bottom dock. Metadata stays in the notebook.
+    std::vector<DockPage> takeDockPages();
+    double canvasSliderValue(const Glib::ustring& id);
+    void setCanvasSlider(const Glib::ustring& id, double value);
 
     ToolPanelCoordinator(bool batch = false);
     ~ToolPanelCoordinator () override;

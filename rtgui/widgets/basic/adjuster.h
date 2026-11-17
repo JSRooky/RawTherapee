@@ -103,6 +103,18 @@ public:
     void setAdjusterListener(AdjusterListener* alistener);
     // return the value trimmed to the limits at construction time
     double getValue() const;
+    double getMin() const
+    {
+        return vMin;
+    }
+    double getMax() const
+    {
+        return vMax;
+    }
+    Glib::ustring getLabelText() const
+    {
+        return label ? label->get_text() : adjustmentName;
+    }
     // return the value trimmed to the limits at construction time
     int getIntValue() const;
     // return the value trimmed to the limits at construction time,

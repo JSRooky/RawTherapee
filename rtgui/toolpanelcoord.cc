@@ -475,7 +475,8 @@ ToolPanelCoordinator::ToolPanelCoordinator (bool batch) : ipc (nullptr), favorit
         imgPanelEnd[i]->show();
         vbPanelEnd[i]->get_style_context()->add_class("PanelEnding");
         vbPanelEnd[i]->pack_start(*imgPanelEnd[i], Gtk::PACK_SHRINK);
-        vbPanelEnd[i]->show_all();
+        vbPanelEnd[i]->set_no_show_all(true);
+        vbPanelEnd[i]->hide();
     }
     const auto& options = App::get().options();
     updateVScrollbars(options.hideTPVScrollbar);
@@ -959,6 +960,230 @@ ToolPanelCoordinator::updateToolPanel(
             favorites,
             cloneFavoriteTools && !is_favorite_panel);
     }
+}
+
+std::vector<ToolPanelCoordinator::DockPage> ToolPanelCoordinator::takeDockPages()
+{
+    notebookconn.block(true);
+
+    const struct {
+        Tool tool;
+        const char* label;
+    } exposureTools[] = {
+        {Tool::TONE_CURVE, "TP_EXPOSURE_LABEL"},
+        {Tool::SHADOWS_HIGHLIGHTS, "TP_SHADOWSHLIGHTS_LABEL"},
+        {Tool::TONE_EQUALIZER, "TP_TONE_EQUALIZER_LABEL"},
+        {Tool::EPD, "TP_EPD_LABEL"},
+        {Tool::FATTAL, "TP_TM_FATTAL_LABEL"},
+        {Tool::PC_VIGNETTE, "TP_PCVIGNETTE_LABEL"},
+        {Tool::GRADIENT, "TP_GRADIENT_LABEL"},
+        {Tool::L_CURVE, "TP_LABCURVE_LABEL"},
+    };
+
+    std::vector<DockPage> pages;
+
+    for (const auto& item : exposureTools) {
+        FoldableToolPanel* panel = getFoldableToolPanel(item.tool);
+        Gtk::Widget* page = panel ? panel->getExpander() : nullptr;
+        if (!page) {
+            continue;
+        }
+        if (Gtk::Widget* parent = page->get_parent()) {
+            dynamic_cast<Gtk::Container*>(parent)->remove(*page);
+        }
+        const Glib::ustring label = M(item.label);
+        pages.push_back(DockPage{"exposure", panel->getToolName(), label, label, page, false});
+    }
+
+    const struct {
+        const char* icon;
+        const char* label;
+        const char* tooltip;
+        Gtk::Widget* page;
+    } items[] = {
+        {"detail", "MAIN_TAB_DETAIL", "MAIN_TAB_DETAIL_TOOLTIP", detailsPanelSW},
+        {"color-circles", "MAIN_TAB_COLOR", "MAIN_TAB_COLOR_TOOLTIP", colorPanelSW},
+        {"atom", "MAIN_TAB_ADVANCED", "MAIN_TAB_ADVANCED_TOOLTIP", advancedPanelSW},
+        {"rt-spot", "MAIN_TAB_LOCALLAB", "MAIN_TAB_LOCALLAB_TOOLTIP", locallabPanelSW},
+        {"transform", "MAIN_TAB_TRANSFORM", "MAIN_TAB_TRANSFORM_TOOLTIP", transformPanelSW},
+        {"bayer", "MAIN_TAB_RAW", "MAIN_TAB_RAW_TOOLTIP", rawPanelSW},
+    };
+
+    for (const auto& item : items) {
+        if (!item.page) {
+            continue;
+        }
+
+        bool extraRef = false;
+
+        if (item.page->get_parent() == toolPanelNotebook) {
+            // The notebook owns the only reference. Keep the widget alive for the dock.
+            item.page->reference();
+            extraRef = true;
+            toolPanelNotebook->remove_page(*item.page);
+        }
+
+        pages.push_back(DockPage{item.icon, item.icon, M(item.label), M(item.tooltip), item.page, extraRef});
+    }
+
+    notebookconn.block(false);
+    return pages;
+}
+
+double ToolPanelCoordinator::canvasSliderValue(const Glib::ustring& id)
+{
+    if (!ipc) {
+        return 0;
+    }
+
+    ProcParams params;
+    ipc->getParams(&params);
+
+    if (id == "exp") {
+        return params.toneCurve.expcomp;
+    }
+    if (id == "con") {
+        return params.toneCurve.contrast;
+    }
+    if (id == "bri") {
+        return params.toneCurve.brightness;
+    }
+    if (id == "sat") {
+        return params.toneCurve.saturation;
+    }
+    if (id == "hil") {
+        return params.sh.highlights;
+    }
+    if (id == "sha") {
+        return params.sh.shadows;
+    }
+    if (id == "shp") {
+        return params.sharpening.amount;
+    }
+    if (id == "rad") {
+        return params.sharpening.radius;
+    }
+    if (id == "tmp") {
+        return params.wb.temperature;
+    }
+    if (id == "grn") {
+        return params.wb.green;
+    }
+    if (id == "vib") {
+        return params.vibrance.pastels;
+    }
+    if (id == "lca") {
+        return params.localContrast.amount;
+    }
+    if (id == "lcr") {
+        return params.localContrast.radius;
+    }
+    if (id == "rot") {
+        return params.rotate.degree;
+    }
+    if (id == "vig") {
+        return params.vignetting.amount;
+    }
+    if (id == "blk") {
+        return params.toneCurve.black;
+    }
+
+    return 0;
+}
+
+void ToolPanelCoordinator::setCanvasSlider(const Glib::ustring& id, double value)
+{
+    if (!ipc) {
+        return;
+    }
+
+    ProcParams params;
+    ipc->getParams(&params);
+    rtengine::ProcEvent ev = rtengine::EvExpComp;
+    ToolPanel* tool = nullptr;
+
+    if (id == "exp") {
+        params.toneCurve.expcomp = value;
+        ev = rtengine::EvExpComp;
+        tool = toneCurve;
+    } else if (id == "con") {
+        params.toneCurve.contrast = static_cast<int>(value);
+        ev = rtengine::EvContrast;
+        tool = toneCurve;
+    } else if (id == "bri") {
+        params.toneCurve.brightness = static_cast<int>(value);
+        ev = rtengine::EvBrightness;
+        tool = toneCurve;
+    } else if (id == "sat") {
+        params.toneCurve.saturation = static_cast<int>(value);
+        ev = rtengine::EvSaturation;
+        tool = toneCurve;
+    } else if (id == "hil") {
+        params.sh.enabled = true;
+        params.sh.highlights = static_cast<int>(value);
+        ev = rtengine::EvSHHighlights;
+        tool = shadowshighlights;
+    } else if (id == "sha") {
+        params.sh.enabled = true;
+        params.sh.shadows = static_cast<int>(value);
+        ev = rtengine::EvSHShadows;
+        tool = shadowshighlights;
+    } else if (id == "shp") {
+        params.sharpening.enabled = true;
+        params.sharpening.amount = static_cast<int>(value);
+        ev = rtengine::EvShrAmount;
+        tool = sharpening;
+    } else if (id == "rad") {
+        params.sharpening.enabled = true;
+        params.sharpening.radius = value;
+        ev = rtengine::EvShrRadius;
+        tool = sharpening;
+    } else if (id == "tmp") {
+        params.wb.method = "Custom";
+        params.wb.temperature = static_cast<int>(value);
+        ev = rtengine::EvWBTemp;
+        tool = whitebalance;
+    } else if (id == "grn") {
+        params.wb.method = "Custom";
+        params.wb.green = value;
+        ev = rtengine::EvWBGreen;
+        tool = whitebalance;
+    } else if (id == "vib") {
+        params.vibrance.enabled = true;
+        params.vibrance.pastels = static_cast<int>(value);
+        ev = rtengine::EvVibrancePastels;
+        tool = vibrance;
+    } else if (id == "lca") {
+        params.localContrast.enabled = true;
+        params.localContrast.amount = value;
+        ev = localContrast->EvLocalContrastAmount;
+        tool = localContrast;
+    } else if (id == "lcr") {
+        params.localContrast.enabled = true;
+        params.localContrast.radius = static_cast<int>(value);
+        ev = localContrast->EvLocalContrastRadius;
+        tool = localContrast;
+    } else if (id == "rot") {
+        params.rotate.degree = value;
+        ev = rtengine::EvROTDegree;
+        tool = rotate;
+    } else if (id == "vig") {
+        params.vignetting.amount = static_cast<int>(value);
+        ev = rtengine::EvVignettingAmount;
+        tool = vignetting;
+    } else if (id == "blk") {
+        params.toneCurve.black = static_cast<int>(value);
+        ev = rtengine::EvBlack;
+        tool = toneCurve;
+    } else {
+        return;
+    }
+
+    if (tool) {
+        tool->read(&params);
+    }
+
+    panelChanged(ev, id);
 }
 
 void ToolPanelCoordinator::addPanel(Gtk::Box* where, FoldableToolPanel* panel, int level)

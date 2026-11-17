@@ -153,6 +153,7 @@ RTWindow::RTWindow ()
     , bpanel (nullptr)
     , splash (nullptr)
     , btn_fullscreen (nullptr)
+    , queueWindow (nullptr)
     , iFullscreen (nullptr)
     , iFullscreen_exit (nullptr)
     , epanel (nullptr)
@@ -309,7 +310,7 @@ RTWindow::RTWindow ()
 
     set_title_decorated ("");
     set_resizable (true);
-    set_decorated (true);
+    set_decorated (false);
     set_default_size (options.windowWidth, options.windowHeight);
     set_modal (false);
 
@@ -343,6 +344,7 @@ RTWindow::RTWindow ()
         mainNB = Gtk::manage (new Gtk::Notebook ());
         mainNB->set_name ("MainNotebook");
         mainNB->set_scrollable (true);
+        mainNB->set_show_tabs (false);
         mainNB->signal_switch_page().connect_notify ( sigc::mem_fun (*this, &RTWindow::on_mainNB_switch_page) );
 
         // Editor panel
@@ -368,7 +370,7 @@ RTWindow::RTWindow ()
 
         fpanelLabelGrid->set_tooltip_markup (M ("MAIN_FRAME_FILEBROWSER_TOOLTIP"));
         fpanelLabelGrid->show_all ();
-        mainNB->append_page (*fpanel, *fpanelLabelGrid);
+        // The file browser is shown from the editor's left edge, not as a notebook page.
 
 
         // Batch Queue panel
@@ -384,11 +386,11 @@ RTWindow::RTWindow ()
         mainNB->append_page (*bpanel, *lbq);
 
 
-        if (isSingleTabMode()) {
+        if (!epanel) {
             createSetmEditor();
         }
 
-        mainNB->set_current_page (mainNB->page_num (*fpanel));
+        mainNB->set_current_page (mainNB->page_num (*epanel));
 
         //Gtk::Box* mainBox = Gtk::manage (new Gtk::Box(Gtk::ORIENTATION_VERTICAL));
         //mainBox->pack_start (*mainNB);
@@ -495,6 +497,7 @@ RTWindow::~RTWindow()
 #endif
 
     delete fpanel;
+    delete queueWindow;
     delete iFullscreen;
     delete iFullscreen_exit;
 }
@@ -690,8 +693,10 @@ void RTWindow::remEditorPanel (EditorPanel* ep)
         mainNB->remove_page (*ep);
 
         if (!isEditorPanel (mainNB->get_current_page())) {
-            if (!queueHadFocus) {
+            if (!queueHadFocus && mainNB->page_num (*fpanel) >= 0) {
                 mainNB->set_current_page (mainNB->page_num (*fpanel));
+            } else if (epanel && mainNB->page_num (*epanel) >= 0) {
+                mainNB->set_current_page (mainNB->page_num (*epanel));
             }
 
             set_title_decorated ("");
@@ -771,11 +776,15 @@ bool RTWindow::keyPressed (GdkEventKey* event)
     if (ctrl) {
         switch (event->keyval) {
             case GDK_KEY_F2: // file browser panel
-                mainNB->set_current_page (mainNB->page_num (*fpanel));
+                if (epanel) {
+                    epanel->showFileBrowser();
+                } else if (mainNB->page_num (*fpanel) >= 0) {
+                    mainNB->set_current_page (mainNB->page_num (*fpanel));
+                }
                 return true;
 
             case GDK_KEY_F3: // batch queue panel
-                mainNB->set_current_page (mainNB->page_num (*bpanel));
+                presentQueue();
                 return true;
 
             case GDK_KEY_F4: //single tab mode, editor panel
@@ -1070,11 +1079,43 @@ void RTWindow::SetEditorCurrent()
 
 void RTWindow::SetMainCurrent()
 {
-    mainNB->set_current_page (mainNB->page_num (*fpanel));
+    if (epanel && mainNB->page_num(*epanel) >= 0) {
+        mainNB->set_current_page (mainNB->page_num (*epanel));
+    }
+}
+
+void RTWindow::presentQueue()
+{
+    if (!bpanel) {
+        return;
+    }
+
+    if (!queueWindow) {
+        queueWindow = new Gtk::Window();
+        queueWindow->set_title(M("MAIN_FRAME_QUEUE"));
+        queueWindow->set_default_size(960, 640);
+        queueWindow->set_transient_for(*this);
+
+        if (bpanel->get_parent()) {
+            bpanel->get_parent()->remove(*bpanel);
+        }
+
+        queueWindow->add(*bpanel);
+        queueWindow->signal_hide().connect([this]() {
+            if (epanel && mainNB && mainNB->page_num(*epanel) >= 0) {
+                mainNB->set_current_page(mainNB->page_num(*epanel));
+            }
+        });
+    }
+
+    queueWindow->show_all();
+    queueWindow->present();
 }
 
 void RTWindow::MoveFileBrowserToMain()
 {
+    // The catalog stays inside the edge file browser.
+#if 0
     if ( fpanel->ribbonPane->get_children().empty()) {
         FileCatalog *fCatalog = fpanel->fileCatalog;
         epanel->catalogPane->remove (*fCatalog);
@@ -1083,10 +1124,13 @@ void RTWindow::MoveFileBrowserToMain()
         fCatalog->tbLeftPanel_1_visible (true);
         fCatalog->tbRightPanel_1_visible (true);
     }
+#endif
 }
 
 void RTWindow::MoveFileBrowserToEditor()
 {
+    // The catalog stays inside the edge file browser.
+#if 0
     if (epanel->catalogPane->get_children().empty() ) {
         FileCatalog *fCatalog = fpanel->fileCatalog;
         fpanel->ribbonPane->remove (*fCatalog);
@@ -1098,6 +1142,7 @@ void RTWindow::MoveFileBrowserToEditor()
         fCatalog->tbLeftPanel_1_visible (false);
         fCatalog->tbRightPanel_1_visible (false);
     }
+#endif
 }
 
 void RTWindow::updateExternalEditorWidget(int selectedIndex, const std::vector<ExternalEditor> & editors)

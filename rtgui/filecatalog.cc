@@ -787,7 +787,7 @@ void FileCatalog::_refreshProgressBar ()
         const auto& options = App::get().options();
         if (!progressImage || !progressLabel) {
             // create tab label once
-            Gtk::Notebook *nb = (Gtk::Notebook *)(filepanel->get_parent());
+            Gtk::Notebook *nb = dynamic_cast<Gtk::Notebook*>(filepanel->get_parent());
             Gtk::Grid* grid = Gtk::manage(new Gtk::Grid());
             setExpandAlignProperties (grid, false, false, Gtk::ALIGN_CENTER, Gtk::ALIGN_CENTER);
             progressImage = Gtk::manage(new RTImage("folder-closed", Gtk::ICON_SIZE_LARGE_TOOLBAR));

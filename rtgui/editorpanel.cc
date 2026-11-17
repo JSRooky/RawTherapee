@@ -19,7 +19,12 @@
  */
 #include "editorpanel.h"
 
+#include <algorithm>
+#include <cstring>
 #include <iostream>
+
+#include <gdkmm/general.h>
+#include <gdkmm/pixbuf.h>
 
 #include "rtengine/array2D.h"
 #include "rtengine/imagesource.h"
@@ -28,7 +33,9 @@
 #include "batchqueueentry.h"
 #include "soundman.h"
 #include "rtimage.h"
+#include "dirbrowser.h"
 #include "filepanel.h"
+#include "widgets/basic/adjuster.h"
 #include "guiutils.h"
 #include "options.h"
 #include "navigator.h"
@@ -704,6 +711,8 @@ public:
 
 EditorPanel::EditorPanel (FilePanel* filePanel)
     : catalogPane (nullptr), realized (false), tbBeforeLock (nullptr), iHistoryShow (nullptr), iHistoryHide (nullptr),
+      canvasStage (nullptr),
+      fileRevealer (nullptr), dockRevealer (nullptr), dockSheet (nullptr), shownDockPage (nullptr), imageMenu (nullptr),
       iTopPanel_1_Show (nullptr), iTopPanel_1_Hide (nullptr), iRightPanel_1_Show (nullptr), iRightPanel_1_Hide (nullptr),
       iBeforeLockON (nullptr), iBeforeLockOFF (nullptr),
       externalEditorChangedSignal (nullptr),
@@ -1048,7 +1057,8 @@ EditorPanel::EditorPanel (FilePanel* filePanel)
     hpanedl->signal_button_release_event().connect_notify ( sigc::mem_fun (*this, &EditorPanel::leftPaneButtonReleased) );
     hpanedr->signal_button_release_event().connect_notify ( sigc::mem_fun (*this, &EditorPanel::rightPaneButtonReleased) );
 
-    pack_start (*hpanedr);
+    viewpaned->remove (*editbox);
+    buildImmersiveShell (editbox);
 
     updateHistogramPosition (0, options.histogramPosition);
 
@@ -1247,8 +1257,882 @@ void EditorPanel::on_realize ()
     tpc->updateToolState();
 }
 
+namespace
+{
+
+void roundedRect(const Cairo::RefPtr<Cairo::Context>& cr, double w, double h, double r)
+{
+    cr->begin_new_sub_path();
+    cr->arc(w - r, r, r, -G_PI / 2, 0);
+    cr->arc(w - r, h - r, r, 0, G_PI / 2);
+    cr->arc(r, h - r, r, G_PI / 2, G_PI);
+    cr->arc(r, r, r, G_PI, 3 * G_PI / 2);
+    cr->close_path();
+}
+
+Glib::RefPtr<Gdk::Pixbuf> blurPixbuf(const Glib::RefPtr<Gdk::Pixbuf>& src, int radius)
+{
+    if (!src || radius < 1) {
+        return src;
+    }
+
+    auto inBuf = src->copy();
+    auto outBuf = src->copy();
+    const int width = inBuf->get_width();
+    const int height = inBuf->get_height();
+    const int channels = inBuf->get_n_channels();
+    const int stride = inBuf->get_rowstride();
+
+    auto pass = [&](const Glib::RefPtr<Gdk::Pixbuf>& in, const Glib::RefPtr<Gdk::Pixbuf>& out, bool horizontal) {
+        guint8* ip = in->get_pixels();
+        guint8* op = out->get_pixels();
+
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                int red = 0;
+                int green = 0;
+                int blue = 0;
+                int count = 0;
+
+                for (int k = -radius; k <= radius; k += 2) {
+                    const int xx = std::max(0, std::min(width - 1, horizontal ? x + k : x));
+                    const int yy = std::max(0, std::min(height - 1, horizontal ? y : y + k));
+                    const guint8* pixel = ip + yy * stride + xx * channels;
+                    red += pixel[0];
+                    green += pixel[1];
+                    blue += pixel[2];
+                    ++count;
+                }
+
+                guint8* dest = op + y * stride + x * channels;
+                dest[0] = red / count;
+                dest[1] = green / count;
+                dest[2] = blue / count;
+
+                if (channels == 4) {
+                    dest[3] = 255;
+                }
+            }
+        }
+    };
+
+    pass(inBuf, outBuf, true);
+    pass(outBuf, inBuf, false);
+    return inBuf;
+}
+
+class FrostedCard : public Gtk::Box
+{
+public:
+    FrostedCard()
+    {
+        set_app_paintable(true);
+        set_orientation(Gtk::ORIENTATION_VERTICAL);
+        get_style_context()->add_class("rt-folder-float");
+    }
+
+    void captureBackdrop()
+    {
+        auto* top = dynamic_cast<Gtk::Widget*>(get_toplevel());
+        const auto window = top ? top->get_window() : Glib::RefPtr<Gdk::Window>();
+        const int width = get_allocated_width();
+        const int height = get_allocated_height();
+
+        if (!window || width < 4 || height < 4) {
+            return;
+        }
+
+        int x = 0;
+        int y = 0;
+        translate_coordinates(*top, 0, 0, x, y);
+        set_opacity(0);
+        window->process_updates(true);
+
+        try {
+            plate = blurPixbuf(Gdk::Pixbuf::create(window, x, y, width, height), 14);
+        } catch (const Glib::Error&) {
+            plate.reset();
+        }
+
+        set_opacity(1);
+        queue_draw();
+    }
+
+protected:
+    bool on_draw(const Cairo::RefPtr<Cairo::Context>& cr) override
+    {
+        const double width = get_allocated_width();
+        const double height = get_allocated_height();
+        const double radius = 16;
+
+        cr->save();
+        cr->set_source_rgba(0, 0, 0, 0.28);
+        roundedRect(cr, width, height, radius);
+        cr->fill();
+
+        cr->translate(0, 0);
+        roundedRect(cr, width, height, radius);
+        cr->clip();
+
+        if (plate) {
+            Gdk::Cairo::set_source_pixbuf(cr, plate, 0, 0);
+            cr->paint();
+        }
+
+        cr->set_source_rgba(0.09, 0.09, 0.11, 0.46);
+        cr->paint();
+        cr->restore();
+
+        cr->save();
+        roundedRect(cr, width - 1, height - 1, radius);
+        cr->set_source_rgba(1, 1, 1, 0.20);
+        cr->set_line_width(1);
+        cr->stroke();
+        cr->restore();
+
+        return Gtk::Box::on_draw(cr);
+    }
+
+private:
+    Glib::RefPtr<Gdk::Pixbuf> plate;
+};
+
+void collectAdjusters(Gtk::Widget* widget, std::vector<Adjuster*>& out)
+{
+    if (!widget) {
+        return;
+    }
+
+    if (auto* adjuster = dynamic_cast<Adjuster*>(widget)) {
+        if (adjuster->get_visible() && adjuster->getMax() > adjuster->getMin()) {
+            out.push_back(adjuster);
+        }
+        return;
+    }
+
+    if (auto* container = dynamic_cast<Gtk::Container*>(widget)) {
+        for (Gtk::Widget* child : container->get_children()) {
+            collectAdjusters(child, out);
+        }
+    }
+}
+
+class CanvasTool : public Gtk::EventBox
+{
+public:
+    explicit CanvasTool(const std::vector<Adjuster*>& adjusters)
+        : dragging(false), collapsed(false), sliding(-1), labelWidth(28), stemX(46), track0(54), track1(100)
+    {
+        set_app_paintable(true);
+        set_visible_window(false);
+        add_events(Gdk::BUTTON_PRESS_MASK | Gdk::BUTTON_RELEASE_MASK | Gdk::POINTER_MOTION_MASK);
+        rows.reserve(adjusters.size());
+
+        for (Adjuster* adjuster : adjusters) {
+            rows.push_back({adjuster, adjuster->getLabelText(), adjuster->getMin(), adjuster->getMax(), adjuster->getValue()});
+            const int chars = static_cast<int>(g_utf8_strlen(rows.back().label.c_str(), -1));
+            labelWidth = std::max(labelWidth, std::min(190, 18 + chars * 7));
+        }
+
+        stemX = 8 + labelWidth + 8;
+        track0 = stemX + 8;
+        track1 = track0 + 115;
+        applySize();
+    }
+
+protected:
+    bool on_draw(const Cairo::RefPtr<Cairo::Context>& cr) override
+    {
+        if (collapsed) {
+            cr->set_source_rgba(0.55, 0.55, 0.55, 0.42);
+            cr->arc(18, 18, 14, 0, 2 * G_PI);
+            cr->fill();
+            cr->set_source_rgba(1, 1, 1, 0.35);
+            cr->set_line_width(1.2);
+            cr->arc(18, 18, 14, 0, 2 * G_PI);
+            cr->stroke();
+            return true;
+        }
+
+        cr->set_line_width(1.4);
+        cr->set_source_rgba(1, 1, 1, 0.92);
+        cr->move_to(stemX, 10);
+        cr->line_to(stemX, 16 + rows.size() * 22 - 8);
+        cr->stroke();
+
+        cr->set_source_rgba(0.98, 0.78, 0.15, 1);
+        cr->arc(stemX, 10, 9, 0, 2 * G_PI);
+        cr->fill();
+        cr->set_source_rgba(0.15, 0.12, 0.05, 0.9);
+        cr->arc(stemX, 10, 3.2, 0, 2 * G_PI);
+        cr->fill();
+
+        cr->select_font_face("sans", Cairo::FONT_SLANT_NORMAL, Cairo::FONT_WEIGHT_BOLD);
+        cr->set_font_size(10);
+
+        for (size_t i = 0; i < rows.size(); ++i) {
+            const double y = 18 + i * 22;
+            const bool active = sliding == static_cast<int>(i);
+            const double span = rows[i].max - rows[i].min;
+            const double t = span == 0 ? 0 : std::max(0.0, std::min(1.0, (rows[i].value - rows[i].min) / span));
+            const double knobX = track0 + t * (track1 - track0);
+
+            cr->save();
+            roundedRectAt(cr, 4, y, labelWidth, 16, 8);
+            if (active) {
+                cr->set_source_rgba(1, 1, 1, 0.55);
+                cr->fill();
+            } else {
+                cr->set_source_rgba(0, 0, 0, 0.92);
+                cr->fill();
+            }
+            cr->restore();
+
+            Cairo::TextExtents extents;
+            cr->get_text_extents(rows[i].label, extents);
+            cr->set_source_rgba(active ? 0.08 : 1, active ? 0.08 : 1, active ? 0.08 : 1, 1);
+            cr->move_to(4 + (labelWidth - extents.width) / 2 - extents.x_bearing, y + 11);
+            cr->show_text(rows[i].label);
+
+            cr->set_source_rgba(1, 1, 1, 0.9);
+            cr->set_line_width(1.2);
+            cr->move_to(4 + labelWidth, y + 8);
+            cr->line_to(knobX, y + 8);
+            cr->stroke();
+
+            cr->set_source_rgba(1, 1, 1, 0.95);
+            cr->arc(knobX, y + 8, 5.5, 0, 2 * G_PI);
+            cr->fill();
+            cr->set_source_rgba(0.12, 0.12, 0.12, 0.85);
+            cr->set_line_width(1.4);
+            cr->arc(knobX, y + 8, 5.5, 0, 2 * G_PI);
+            cr->stroke();
+            cr->move_to(knobX - 3, y + 8);
+            cr->line_to(knobX + 3, y + 8);
+            cr->stroke();
+        }
+
+        return true;
+    }
+
+    bool on_button_press_event(GdkEventButton* event) override
+    {
+        if (event->button != 1) {
+            return false;
+        }
+
+        const double ax = collapsed ? 18.0 : stemX;
+        const double ay = collapsed ? 18.0 : 10.0;
+        const double dx = event->x - ax;
+        const double dy = event->y - ay;
+        if (collapsed || dx * dx + dy * dy < 16 * 16) {
+            anchorPress = true;
+            dragging = false;
+            grabX = event->x_root;
+            grabY = event->y_root;
+            originLeft = get_margin_start();
+            originTop = get_margin_top();
+            return true;
+        }
+
+        const int row = static_cast<int>((event->y - 18) / 22);
+        if (row >= 0 && row < static_cast<int>(rows.size())) {
+            sliding = row;
+            updateRow(row, event->x);
+        }
+        return true;
+    }
+
+    bool on_motion_notify_event(GdkEventMotion* event) override
+    {
+        if (anchorPress || dragging) {
+            const double moved = std::hypot(event->x_root - grabX, event->y_root - grabY);
+            if (moved > 4) {
+                dragging = true;
+                anchorPress = false;
+            }
+            if (dragging) {
+                set_margin_start(std::max(0, originLeft + static_cast<int>(event->x_root - grabX)));
+                set_margin_top(std::max(0, originTop + static_cast<int>(event->y_root - grabY)));
+            }
+            return true;
+        }
+
+        if (sliding >= 0) {
+            updateRow(sliding, event->x);
+        }
+        return true;
+    }
+
+    bool on_button_release_event(GdkEventButton* event) override
+    {
+        if (anchorPress && !dragging) {
+            collapsed = !collapsed;
+            applySize();
+        }
+        anchorPress = false;
+        dragging = false;
+        sliding = -1;
+        queue_draw();
+        return event->button == 1;
+    }
+
+private:
+    struct Row {
+        Adjuster* source;
+        Glib::ustring label;
+        double min;
+        double max;
+        double value;
+    };
+
+    static void roundedRectAt(const Cairo::RefPtr<Cairo::Context>& cr, double x, double y, double w, double h, double r)
+    {
+        cr->begin_new_sub_path();
+        cr->arc(x + w - r, y + r, r, -G_PI / 2, 0);
+        cr->arc(x + w - r, y + h - r, r, 0, G_PI / 2);
+        cr->arc(x + r, y + h - r, r, G_PI / 2, G_PI);
+        cr->arc(x + r, y + r, r, G_PI, 3 * G_PI / 2);
+        cr->close_path();
+    }
+
+    void applySize()
+    {
+        if (collapsed) {
+            set_size_request(36, 36);
+        } else {
+            set_size_request(static_cast<int>(track1 + 14), 18 + static_cast<int>(rows.size()) * 22);
+        }
+    }
+
+    void updateRow(int index, double x)
+    {
+        const double t = std::max(0.0, std::min(1.0, (x - track0) / std::max(1.0, track1 - track0)));
+        rows[index].value = rows[index].min + t * (rows[index].max - rows[index].min);
+        if (rows[index].source) {
+            rows[index].source->setValue(rows[index].value);
+            rows[index].source->notifyListener();
+        }
+        queue_draw();
+    }
+
+    std::vector<Row> rows;
+    bool dragging;
+    bool collapsed;
+    bool anchorPress = false;
+    int sliding;
+    int labelWidth;
+    double stemX;
+    double track0;
+    double track1;
+    double grabX;
+    double grabY;
+    int originLeft;
+    int originTop;
+};
+
+bool pointerInsideWidget(Gtk::Widget* widget)
+{
+    if (!widget || !widget->get_visible() || !widget->get_realized()) {
+        return false;
+    }
+
+    int x = 0;
+    int y = 0;
+    widget->get_pointer(x, y);
+    return x >= 0 && y >= 0 && x < widget->get_allocated_width() && y < widget->get_allocated_height();
+}
+
+}
+
+void EditorPanel::buildImmersiveShell(Gtk::Box* editbox)
+{
+    const std::vector<Gtk::Widget*> children = editbox->get_children();
+
+    for (Gtk::Widget* child : children) {
+        if (child != beforeAfterBox) {
+            editbox->remove(*child);
+        }
+    }
+
+    Gtk::Overlay* stage = Gtk::manage(new Gtk::Overlay());
+    canvasStage = stage;
+    stage->add(*editbox);
+
+    auto edgeEvents = [](Gtk::EventBox* edge) {
+        edge->set_visible_window(false);
+        edge->add_events(Gdk::ENTER_NOTIFY_MASK | Gdk::LEAVE_NOTIFY_MASK);
+    };
+
+    if (fPanel) {
+        if (Gtk::Widget* fileParent = fPanel->get_parent()) {
+            dynamic_cast<Gtk::Container*>(fileParent)->remove(*fPanel);
+        }
+
+        if (Gtk::Widget* folderParent = fPanel->dirBrowser->get_parent()) {
+            dynamic_cast<Gtk::Container*>(folderParent)->remove(*fPanel->dirBrowser);
+        }
+
+        FrostedCard* folderCard = Gtk::manage(new FrostedCard());
+        folderCard->set_size_request(300, 680);
+        folderCard->set_margin_start(16);
+        folderCard->set_margin_end(10);
+        fPanel->dirBrowser->set_vexpand(true);
+        fPanel->dirBrowser->get_style_context()->add_class("rt-folder-float");
+        folderCard->pack_start(*fPanel->dirBrowser, true, true);
+
+        static bool folderCssLoaded = false;
+        if (!folderCssLoaded) {
+            auto provider = Gtk::CssProvider::create();
+            provider->load_from_data(
+                ".rt-folder-float, .rt-folder-float treeview, .rt-folder-float treeview.view,"
+                ".rt-folder-float viewport, .rt-folder-float scrolledwindow {"
+                " background-color: transparent; color: #f5f5f7; border: none; }"
+                ".rt-folder-float treeview.view:selected,"
+                ".rt-folder-float treeview.view:selected:focus {"
+                " background-color: rgba(255,255,255,0.18); }"
+                ".rt-folder-float header { background-color: transparent; }"
+            );
+            Gtk::StyleContext::add_provider_for_screen(
+                Gdk::Screen::get_default(), provider, GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+            folderCssLoaded = true;
+        }
+
+        fileRevealer = Gtk::manage(new Gtk::Revealer());
+        fileRevealer->set_transition_type(Gtk::REVEALER_TRANSITION_TYPE_SLIDE_RIGHT);
+        fileRevealer->set_transition_duration(180);
+        fileRevealer->set_halign(Gtk::ALIGN_START);
+        fileRevealer->set_valign(Gtk::ALIGN_CENTER);
+        fileRevealer->set_reveal_child(false);
+        fileRevealer->add(*folderCard);
+        fileRevealer->property_reveal_child().signal_changed().connect([folderCard, this]() {
+            if (fileRevealer && fileRevealer->get_reveal_child()) {
+                Glib::signal_idle().connect([folderCard]() {
+                    folderCard->captureBackdrop();
+                    return false;
+                });
+            }
+        });
+        fileRevealer->add_events(Gdk::ENTER_NOTIFY_MASK | Gdk::LEAVE_NOTIFY_MASK);
+        fileRevealer->signal_enter_notify_event().connect([this](GdkEventCrossing* event) {
+            return edgeCrossed(event, fileRevealer, fileRevealer, fileHideConn, true);
+        });
+        fileRevealer->signal_leave_notify_event().connect([this](GdkEventCrossing* event) {
+            return edgeCrossed(event, fileRevealer, fileRevealer, fileHideConn, false);
+        });
+
+        Gtk::EventBox* fileEdge = Gtk::manage(new Gtk::EventBox());
+        edgeEvents(fileEdge);
+        fileEdge->set_size_request(12, -1);
+        fileEdge->set_halign(Gtk::ALIGN_START);
+        fileEdge->set_valign(Gtk::ALIGN_FILL);
+        fileEdge->signal_enter_notify_event().connect([this](GdkEventCrossing* event) {
+            return edgeCrossed(event, fileRevealer, fileRevealer, fileHideConn, true);
+        });
+        fileEdge->signal_leave_notify_event().connect([this](GdkEventCrossing* event) {
+            return edgeCrossed(event, fileRevealer, fileRevealer, fileHideConn, false);
+        });
+
+        stage->add_overlay(*fileRevealer);
+        stage->add_overlay(*fileEdge);
+    }
+
+    Gtk::Box* dockBox = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_VERTICAL));
+    dockBox->set_halign(Gtk::ALIGN_CENTER);
+    dockBox->set_valign(Gtk::ALIGN_END);
+    dockSheet = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_VERTICAL));
+    dockSheet->set_size_request(440, 320);
+    dockSheet->set_halign(Gtk::ALIGN_CENTER);
+    dockSheet->get_style_context()->add_class("rt-dock-sheet");
+    dockSheet->set_no_show_all(true);
+    dockSheet->hide();
+
+    Gtk::Box* dockButtons = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_HORIZONTAL));
+    dockButtons->get_style_context()->add_class("rt-dock");
+    dockButtons->set_halign(Gtk::ALIGN_CENTER);
+    dockButtons->set_spacing(6);
+    dockButtons->set_margin_bottom(16);
+
+    static bool dockCssLoaded = false;
+    if (!dockCssLoaded) {
+        auto provider = Gtk::CssProvider::create();
+        provider->load_from_data(
+            ".rt-dock { background-color: rgba(48,48,50,0.82);"
+            " border-radius: 20px; border: 1px solid rgba(255,255,255,0.18); padding: 6px 8px; }"
+            ".rt-dock button { background: none; border: none; box-shadow: none;"
+            " min-width: 46px; min-height: 46px; padding: 4px; border-radius: 12px; }"
+            ".rt-dock button:hover { background-color: rgba(255,255,255,0.16); }"
+            ".rt-dock-sheet { background-color: rgba(28,28,30,0.88);"
+            " border-radius: 16px; border: 1px solid rgba(255,255,255,0.16); padding: 8px; }"
+        );
+        Gtk::StyleContext::add_provider_for_screen(
+            Gdk::Screen::get_default(), provider, GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        dockCssLoaded = true;
+    }
+
+    for (const ToolPanelCoordinator::DockPage& page : tpc->takeDockPages()) {
+        Gtk::Button* button = Gtk::manage(new Gtk::Button());
+        button->set_relief(Gtk::RELIEF_NONE);
+        button->set_tooltip_text(page.label);
+        button->set_image(*Gtk::manage(new RTImage(page.iconName, Gtk::ICON_SIZE_LARGE_TOOLBAR)));
+        page.page->set_no_show_all(true);
+        page.page->hide();
+        page.page->set_vexpand(true);
+        dockSheet->pack_start(*page.page, true, true);
+
+        if (page.extraRef) {
+            page.page->unreference();
+        }
+
+        Gtk::Widget* pageWidget = page.page;
+        button->signal_clicked().connect([this, pageWidget]() {
+            selectDockPage(pageWidget);
+        });
+        dockSources.emplace_back(page.id, page.page);
+        const Glib::ustring group = page.id;
+        std::vector<Gtk::TargetEntry> dragTargets;
+        dragTargets.emplace_back("application/x-rt-tool", Gtk::TARGET_SAME_APP, 0);
+        button->drag_source_set(dragTargets, Gdk::BUTTON1_MASK, Gdk::ACTION_COPY);
+        button->signal_drag_data_get().connect([group](const Glib::RefPtr<Gdk::DragContext>&, Gtk::SelectionData& data, guint, guint) {
+            data.set("application/x-rt-tool", group);
+        });
+        dockButtons->pack_start(*button, Gtk::PACK_SHRINK);
+    }
+
+    dockBox->pack_start(*dockSheet, Gtk::PACK_SHRINK);
+    dockBox->pack_start(*dockButtons, Gtk::PACK_SHRINK);
+
+    dockRevealer = Gtk::manage(new Gtk::Revealer());
+    dockRevealer->set_transition_type(Gtk::REVEALER_TRANSITION_TYPE_SLIDE_UP);
+    dockRevealer->set_transition_duration(160);
+    dockRevealer->set_halign(Gtk::ALIGN_CENTER);
+    dockRevealer->set_valign(Gtk::ALIGN_END);
+    dockRevealer->set_reveal_child(false);
+    dockRevealer->add(*dockBox);
+    dockRevealer->add_events(Gdk::ENTER_NOTIFY_MASK | Gdk::LEAVE_NOTIFY_MASK);
+    dockRevealer->signal_enter_notify_event().connect([this](GdkEventCrossing* event) {
+        return edgeCrossed(event, dockRevealer, dockRevealer, dockHideConn, true);
+    });
+    dockRevealer->signal_leave_notify_event().connect([this](GdkEventCrossing* event) {
+        return edgeCrossed(event, dockRevealer, dockRevealer, dockHideConn, false);
+    });
+
+    Gtk::EventBox* dockEdge = Gtk::manage(new Gtk::EventBox());
+    edgeEvents(dockEdge);
+    dockEdge->set_size_request(-1, 12);
+    dockEdge->set_halign(Gtk::ALIGN_FILL);
+    dockEdge->set_valign(Gtk::ALIGN_END);
+    dockEdge->signal_enter_notify_event().connect([this](GdkEventCrossing* event) {
+        return edgeCrossed(event, dockRevealer, dockRevealer, dockHideConn, true);
+    });
+    dockEdge->signal_leave_notify_event().connect([this](GdkEventCrossing* event) {
+        return edgeCrossed(event, dockRevealer, dockRevealer, dockHideConn, false);
+    });
+
+    stage->add_overlay(*dockRevealer);
+    stage->add_overlay(*dockEdge);
+
+    auto resizeEdge = [this, stage](Gtk::Align halign, Gtk::Align valign, int width, int height, Gdk::WindowEdge edge) {
+        Gtk::EventBox* grip = Gtk::manage(new Gtk::EventBox());
+        grip->set_visible_window(false);
+        grip->add_events(Gdk::BUTTON_PRESS_MASK);
+        grip->set_halign(halign);
+        grip->set_valign(valign);
+        grip->set_size_request(width, height);
+        grip->signal_button_press_event().connect([this, edge](GdkEventButton* event) {
+            if (!parent || event->button != 1 || event->type != GDK_BUTTON_PRESS) {
+                return false;
+            }
+
+            parent->begin_resize_drag(edge, event->button, static_cast<int>(event->x_root), static_cast<int>(event->y_root), event->time);
+            return true;
+        });
+        stage->add_overlay(*grip);
+    };
+    resizeEdge(Gtk::ALIGN_END, Gtk::ALIGN_FILL, 6, -1, Gdk::WINDOW_EDGE_EAST);
+    resizeEdge(Gtk::ALIGN_FILL, Gtk::ALIGN_END, -1, 6, Gdk::WINDOW_EDGE_SOUTH);
+    resizeEdge(Gtk::ALIGN_END, Gtk::ALIGN_END, 14, 14, Gdk::WINDOW_EDGE_SOUTH_EAST);
+
+    Gtk::Box* captionBar = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_HORIZONTAL));
+    captionBar->set_name("window-controls");
+    captionBar->set_halign(Gtk::ALIGN_END);
+    captionBar->set_valign(Gtk::ALIGN_START);
+    captionBar->get_style_context()->add_class("rt-window-controls");
+
+    auto windowButton = [this, captionBar](const Glib::ustring& glyph, const Glib::ustring& cssClass, const sigc::slot<void>& action) {
+        Gtk::Button* button = Gtk::manage(new Gtk::Button(glyph));
+        button->set_relief(Gtk::RELIEF_NONE);
+        button->get_style_context()->add_class(cssClass);
+        button->signal_clicked().connect(action);
+        captionBar->pack_start(*button, Gtk::PACK_SHRINK);
+    };
+    windowButton("–", "rt-window-minimize", [this]() {
+        if (parent) {
+            parent->iconify();
+        }
+    });
+    windowButton("□", "rt-window-maximize", [this]() {
+        if (!parent) {
+            return;
+        }
+        if (parent->is_maximized()) {
+            parent->unmaximize();
+        } else {
+            parent->maximize();
+        }
+    });
+    windowButton("✕", "rt-window-close", [this]() {
+        if (parent && !parent->on_delete_event(nullptr)) {
+            gtk_main_quit();
+        }
+    });
+
+    static bool captionCssLoaded = false;
+    if (!captionCssLoaded) {
+        auto provider = Gtk::CssProvider::create();
+        provider->load_from_data(
+            ".rt-window-controls { background-color: rgba(0,0,0,0.92); }"
+            ".rt-window-controls button { background: none; border: none; box-shadow: none;"
+            " color: #f2f2f2; min-width: 46px; min-height: 32px; padding: 0; font-size: 14px; }"
+            ".rt-window-controls button:hover { background-color: rgba(255,255,255,0.14); }"
+            ".rt-window-controls button.rt-window-close:hover { background-color: #c42b1c; color: white; }"
+        );
+        Gtk::StyleContext::add_provider_for_screen(
+            Gdk::Screen::get_default(), provider, GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+        captionCssLoaded = true;
+    }
+
+    Gtk::Revealer* captionRevealer = Gtk::manage(new Gtk::Revealer());
+    captionRevealer->set_transition_type(Gtk::REVEALER_TRANSITION_TYPE_SLIDE_DOWN);
+    captionRevealer->set_transition_duration(120);
+    captionRevealer->set_halign(Gtk::ALIGN_END);
+    captionRevealer->set_valign(Gtk::ALIGN_START);
+    captionRevealer->set_reveal_child(false);
+    captionRevealer->add(*captionBar);
+    captionRevealer->add_events(Gdk::ENTER_NOTIFY_MASK | Gdk::LEAVE_NOTIFY_MASK);
+    captionRevealer->signal_enter_notify_event().connect([this, captionRevealer](GdkEventCrossing* event) {
+        return edgeCrossed(event, captionRevealer, captionRevealer, captionHideConn, true);
+    });
+    captionRevealer->signal_leave_notify_event().connect([this, captionRevealer](GdkEventCrossing* event) {
+        return edgeCrossed(event, captionRevealer, captionRevealer, captionHideConn, false);
+    });
+
+    Gtk::EventBox* titleEdge = Gtk::manage(new Gtk::EventBox());
+    titleEdge->set_visible_window(false);
+    titleEdge->add_events(Gdk::BUTTON_PRESS_MASK | Gdk::ENTER_NOTIFY_MASK | Gdk::LEAVE_NOTIFY_MASK);
+    titleEdge->set_size_request(-1, 14);
+    titleEdge->set_halign(Gtk::ALIGN_FILL);
+    titleEdge->set_valign(Gtk::ALIGN_START);
+    titleEdge->signal_enter_notify_event().connect([this, captionRevealer](GdkEventCrossing* event) {
+        return edgeCrossed(event, captionRevealer, captionRevealer, captionHideConn, true);
+    });
+    titleEdge->signal_leave_notify_event().connect([this, captionRevealer](GdkEventCrossing* event) {
+        return edgeCrossed(event, captionRevealer, captionRevealer, captionHideConn, false);
+    });
+    titleEdge->signal_button_press_event().connect([this](GdkEventButton* event) {
+        if (!parent || event->button != 1) {
+            return false;
+        }
+
+        if (event->type == GDK_2BUTTON_PRESS) {
+            if (parent->is_maximized()) {
+                parent->unmaximize();
+            } else {
+                parent->maximize();
+            }
+            return true;
+        }
+
+        if (event->type == GDK_BUTTON_PRESS) {
+            parent->begin_move_drag(event->button, static_cast<int>(event->x_root), static_cast<int>(event->y_root), event->time);
+        }
+        return true;
+    });
+    stage->add_overlay(*titleEdge);
+    stage->add_overlay(*captionRevealer);
+
+    iareapanel->imageArea->signal_button_press_event().connect(sigc::mem_fun(*this, &EditorPanel::onImageButtonPress), false);
+    std::vector<Gtk::TargetEntry> dropTargets;
+    dropTargets.emplace_back("application/x-rt-tool", Gtk::TARGET_SAME_APP, 0);
+    iareapanel->imageArea->drag_dest_set(dropTargets, Gtk::DEST_DEFAULT_ALL, Gdk::ACTION_COPY);
+    iareapanel->imageArea->signal_drag_data_received().connect(
+        [this](const Glib::RefPtr<Gdk::DragContext>& context, int x, int y, const Gtk::SelectionData& data, guint, guint time) {
+            const Glib::ustring group = data.get_data_as_string();
+            int stageX = x;
+            int stageY = y;
+            if (canvasStage) {
+                iareapanel->imageArea->translate_coordinates(*canvasStage, x, y, stageX, stageY);
+            }
+            placeCanvasTool(group, stageX, stageY);
+            context->drag_finish(true, false, time);
+        });
+
+    pack_start(*stage);
+}
+
+void EditorPanel::scheduleHide(sigc::connection& conn, Gtk::Revealer* revealer, Gtk::Widget* edge)
+{
+    conn.disconnect();
+    conn = Glib::signal_timeout().connect([revealer, edge]() -> bool {
+        if (pointerInsideWidget(revealer) || pointerInsideWidget(edge)) {
+            return true;
+        }
+
+        revealer->set_reveal_child(false);
+        return false;
+    }, 350);
+}
+
+bool EditorPanel::edgeCrossed(GdkEventCrossing* event, Gtk::Revealer* revealer, Gtk::Widget* edge, sigc::connection& conn, bool enter)
+{
+    if (!revealer || event->detail == GDK_NOTIFY_INFERIOR) {
+        return false;
+    }
+
+    if (enter) {
+        conn.disconnect();
+        revealer->set_reveal_child(true);
+    } else {
+        scheduleHide(conn, revealer, edge);
+    }
+
+    return false;
+}
+
+void EditorPanel::showFileBrowser()
+{
+    if (!fileRevealer) {
+        return;
+    }
+
+    fileHideConn.disconnect();
+    fileRevealer->set_reveal_child(true);
+}
+
+void EditorPanel::showToolDock()
+{
+    if (!dockRevealer) {
+        return;
+    }
+
+    dockHideConn.disconnect();
+    dockRevealer->set_reveal_child(true);
+}
+
+void EditorPanel::placeCanvasTool(const Glib::ustring& group, int x, int y)
+{
+    if (!canvasStage) {
+        return;
+    }
+
+    for (const auto& chip : canvasChips) {
+        if (chip.first == group && chip.second) {
+            chip.second->set_margin_start(std::max(0, x));
+            chip.second->set_margin_top(std::max(0, y));
+            return;
+        }
+    }
+
+    Gtk::Widget* source = nullptr;
+    for (const auto& item : dockSources) {
+        if (item.first == group) {
+            source = item.second;
+            break;
+        }
+    }
+
+    std::vector<Adjuster*> adjusters;
+    collectAdjusters(source, adjusters);
+    if (adjusters.empty()) {
+        return;
+    }
+
+    CanvasTool* tool = Gtk::manage(new CanvasTool(adjusters));
+    tool->set_halign(Gtk::ALIGN_START);
+    tool->set_valign(Gtk::ALIGN_START);
+    tool->set_margin_start(std::max(0, x));
+    tool->set_margin_top(std::max(0, y));
+    canvasStage->add_overlay(*tool);
+    tool->show();
+    canvasChips.emplace_back(group, tool);
+}
+
+void EditorPanel::selectDockPage(Gtk::Widget* page)
+{
+    if (!dockSheet || !page) {
+        return;
+    }
+
+    if (shownDockPage == page && page->get_visible()) {
+        page->hide();
+        dockSheet->hide();
+        shownDockPage = nullptr;
+        return;
+    }
+
+    for (Gtk::Widget* child : dockSheet->get_children()) {
+        child->hide();
+    }
+
+    dockSheet->show();
+    page->show();
+    shownDockPage = page;
+    showToolDock();
+}
+
+bool EditorPanel::onImageButtonPress(GdkEventButton* event)
+{
+    if (event->button != 3 || (event->state & (GDK_SHIFT_MASK | GDK_CONTROL_MASK))) {
+        return false;
+    }
+
+    if (iareapanel->imageArea->getToolMode() != TMHand || iareapanel->imageArea->getCurrSubscriber()) {
+        return false;
+    }
+
+    showImageMenu(event);
+    return true;
+}
+
+void EditorPanel::showImageMenu(GdkEventButton* event)
+{
+    if (!parent) {
+        return;
+    }
+
+    if (!imageMenu) {
+        imageMenu = Gtk::manage(new Gtk::Menu());
+
+        auto addItem = [this](const Glib::ustring& label, const sigc::slot<void>& slot) {
+            Gtk::MenuItem* item = Gtk::manage(new Gtk::MenuItem(label));
+            item->signal_activate().connect(slot);
+            imageMenu->append(*item);
+        };
+
+        addItem(M("GENERAL_SAVE"), sigc::mem_fun(*this, &EditorPanel::saveProfile));
+        addItem(M("GENERAL_SAVE_AS"), sigc::mem_fun(*this, &EditorPanel::saveAsPressed));
+        addItem(M("SAVEDLG_PUTTOQUEUE"), sigc::mem_fun(*this, &EditorPanel::queueImgPressed));
+        addItem(M("MAIN_FRAME_QUEUE"), sigc::mem_fun(*parent, &RTWindow::presentQueue));
+        addItem(M("MAIN_BUTTON_PREFERENCES"), sigc::mem_fun(*parent, &RTWindow::showPreferences));
+        addItem(M("GENERAL_HELP"), sigc::mem_fun(*parent, &RTWindow::showRawPedia));
+        addItem(M("MAIN_BUTTON_ICCPROFCREATOR"), sigc::mem_fun(*parent, &RTWindow::showICCProfileCreator));
+        addItem(M("MAIN_BUTTON_FULLSCREEN"), sigc::mem_fun(*parent, &RTWindow::toggle_fullscreen));
+        addItem(M("GENERAL_CLOSE"), [this]() {
+            if (!parent->on_delete_event(nullptr)) {
+                gtk_main_quit();
+            }
+        });
+        imageMenu->show_all();
+    }
+
+    imageMenu->popup_at_pointer(reinterpret_cast<GdkEvent*>(event));
+}
+
 void EditorPanel::open (Thumbnail* tmb, rtengine::InitialImage* isrc)
 {
+    if (fileRevealer) {
+        fileRevealer->set_reveal_child (false);
+    }
 
     close();
 

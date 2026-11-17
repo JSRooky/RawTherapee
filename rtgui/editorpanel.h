@@ -31,6 +31,9 @@
 #include "rtengine/noncopyable.h"
 #include "rtengine/rtengine.h"
 
+#include <utility>
+#include <vector>
+
 #include <gtkmm.h>
 
 namespace rtengine
@@ -203,6 +206,9 @@ public:
 
     void defaultMonitorProfileChanged (const Glib::ustring &profile_name, bool auto_monitor_profile);
 
+    void showFileBrowser();
+    void showToolDock();
+
     bool saveImmediately (const Glib::ustring &filename, const SaveFormat &sf);
 
     Gtk::Paned* catalogPane;
@@ -278,6 +284,27 @@ private:
     Gtk::Box* beforeHeaderBox;
     Gtk::Box* afterHeaderBox;
     Gtk::ToggleButton* toggleHistogramProfile;
+
+    Gtk::Overlay* canvasStage;
+    std::vector<std::pair<Glib::ustring, Gtk::Widget*>> canvasChips;
+    std::vector<std::pair<Glib::ustring, Gtk::Widget*>> dockSources;
+    void placeCanvasTool(const Glib::ustring& group, int x, int y);
+
+    Gtk::Revealer* fileRevealer;
+    Gtk::Revealer* dockRevealer;
+    Gtk::Box* dockSheet;
+    Gtk::Widget* shownDockPage;
+    Gtk::Menu* imageMenu;
+    sigc::connection fileHideConn;
+    sigc::connection dockHideConn;
+    sigc::connection captionHideConn;
+
+    void buildImmersiveShell(Gtk::Box* editbox);
+    void scheduleHide(sigc::connection& conn, Gtk::Revealer* revealer, Gtk::Widget* edge);
+    bool edgeCrossed(GdkEventCrossing* event, Gtk::Revealer* revealer, Gtk::Widget* edge, sigc::connection& conn, bool enter);
+    bool onImageButtonPress(GdkEventButton* event);
+    void showImageMenu(GdkEventButton* event);
+    void selectDockPage(Gtk::Widget* page);
 
     Gtk::Frame* ppframe;
     ProfilePanel* profilep;

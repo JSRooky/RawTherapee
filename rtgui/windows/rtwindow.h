@@ -59,6 +59,7 @@ private:
     sigc::connection onConfEventConn;
     bool on_delete_has_run;
     Gtk::Button * btn_fullscreen;
+    Gtk::Window * queueWindow;
 
     Gtk::Image *iFullscreen, *iFullscreen_exit;
 
@@ -119,6 +120,7 @@ public:
 
     void SetEditorCurrent();
     void SetMainCurrent();
+    void presentQueue();
     void MoveFileBrowserToEditor();
     void MoveFileBrowserToMain();
 

@@ -33,12 +33,12 @@ private:
     Adjuster *lightness;
 
     rtengine::ProcEvent EvLocalContrastEnabled;
-    rtengine::ProcEvent EvLocalContrastRadius;
-    rtengine::ProcEvent EvLocalContrastAmount;
     rtengine::ProcEvent EvLocalContrastDarkness;
     rtengine::ProcEvent EvLocalContrastLightness;
-    
+
 public:
+    rtengine::ProcEvent EvLocalContrastRadius;
+    rtengine::ProcEvent EvLocalContrastAmount;
     static const Glib::ustring TOOL_NAME;
 
     LocalContrast();
