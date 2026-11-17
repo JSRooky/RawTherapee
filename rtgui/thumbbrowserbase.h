@@ -211,6 +211,14 @@ public:
     }
     void on_style_updated () override;
     void resort (); // re-apply sort method
+    bool isVertical() const
+    {
+        return arrangement == TB_Vertical;
+    }
+    int getVerticalColumnWidth() const
+    {
+        return std::max(previewHeight * 3 / 2 + 56, 160);
+    }
     void redraw (ThumbBrowserEntryBase* entry = nullptr);   // arrange files and draw area
     void refreshThumbImages (); // refresh thumbnail sizes, re-generate thumbnail images, arrange and draw
     void refreshQuickThumbImages (); // refresh thumbnail sizes, re-generate thumbnail images, arrange and draw

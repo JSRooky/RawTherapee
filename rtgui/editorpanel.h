@@ -208,6 +208,7 @@ public:
 
     void showFileBrowser();
     void showToolDock();
+    void hideFilmstrip();
 
     bool saveImmediately (const Glib::ustring &filename, const SaveFormat &sf);
 
@@ -291,11 +292,13 @@ private:
     void placeCanvasTool(const Glib::ustring& group, int x, int y);
 
     Gtk::Revealer* fileRevealer;
+    Gtk::Revealer* filmRevealer;
     Gtk::Revealer* dockRevealer;
     Gtk::Box* dockSheet;
     Gtk::Widget* shownDockPage;
     Gtk::Menu* imageMenu;
     sigc::connection fileHideConn;
+    sigc::connection filmHideConn;
     sigc::connection dockHideConn;
     sigc::connection captionHideConn;
 

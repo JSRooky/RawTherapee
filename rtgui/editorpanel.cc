@@ -712,7 +712,7 @@ public:
 EditorPanel::EditorPanel (FilePanel* filePanel)
     : catalogPane (nullptr), realized (false), tbBeforeLock (nullptr), iHistoryShow (nullptr), iHistoryHide (nullptr),
       canvasStage (nullptr),
-      fileRevealer (nullptr), dockRevealer (nullptr), dockSheet (nullptr), shownDockPage (nullptr), imageMenu (nullptr),
+      fileRevealer (nullptr), filmRevealer (nullptr), dockRevealer (nullptr), dockSheet (nullptr), shownDockPage (nullptr), imageMenu (nullptr),
       iTopPanel_1_Show (nullptr), iTopPanel_1_Hide (nullptr), iRightPanel_1_Show (nullptr), iRightPanel_1_Hide (nullptr),
       iBeforeLockON (nullptr), iBeforeLockOFF (nullptr),
       externalEditorChangedSignal (nullptr),
@@ -1735,6 +1735,62 @@ void EditorPanel::buildImmersiveShell(Gtk::Box* editbox)
 
         stage->add_overlay(*fileRevealer);
         stage->add_overlay(*fileEdge);
+
+        if (Gtk::Widget* filmParent = fPanel->fileCatalog->fileBrowser->get_parent()) {
+            dynamic_cast<Gtk::Container*>(filmParent)->remove(*fPanel->fileCatalog->fileBrowser);
+        }
+
+        FileBrowser* filmBrowser = fPanel->fileCatalog->fileBrowser;
+        const int columnWidth = filmBrowser->getVerticalColumnWidth() + 18;
+        FrostedCard* filmCard = Gtk::manage(new FrostedCard());
+        filmCard->set_size_request(columnWidth, -1);
+        filmCard->set_margin_top(12);
+        filmCard->set_margin_bottom(12);
+        filmCard->set_margin_end(12);
+        filmCard->set_vexpand(true);
+        filmBrowser->set_size_request(columnWidth, -1);
+        filmBrowser->set_vexpand(true);
+        filmBrowser->set_hexpand(false);
+        filmCard->pack_start(*filmBrowser, true, true);
+
+        filmRevealer = Gtk::manage(new Gtk::Revealer());
+        filmRevealer->set_transition_type(Gtk::REVEALER_TRANSITION_TYPE_SLIDE_LEFT);
+        filmRevealer->set_transition_duration(180);
+        filmRevealer->set_halign(Gtk::ALIGN_END);
+        filmRevealer->set_valign(Gtk::ALIGN_FILL);
+        filmRevealer->set_vexpand(true);
+        filmRevealer->set_reveal_child(false);
+        filmRevealer->add(*filmCard);
+        filmRevealer->property_reveal_child().signal_changed().connect([filmCard, filmBrowser, this]() {
+            if (filmRevealer && filmRevealer->get_reveal_child()) {
+                filmCard->show_all();
+                Glib::signal_idle().connect([filmCard, filmBrowser]() {
+                    filmCard->captureBackdrop();
+                    filmBrowser->refreshThumbImages();
+                    return false;
+                });
+            }
+        });
+        filmRevealer->add_events(Gdk::ENTER_NOTIFY_MASK | Gdk::LEAVE_NOTIFY_MASK);
+        filmRevealer->signal_enter_notify_event().connect([this](GdkEventCrossing* event) {
+            return edgeCrossed(event, filmRevealer, filmRevealer, filmHideConn, true);
+        });
+        filmRevealer->signal_leave_notify_event().connect([this](GdkEventCrossing* event) {
+            return edgeCrossed(event, filmRevealer, filmRevealer, filmHideConn, false);
+        });
+        stage->add_overlay(*filmRevealer);
+
+        fPanel->dirBrowser->dirSelected().connect([this, filmBrowser](const Glib::ustring& dirname, const Glib::ustring&) {
+            if (dirname.empty() || !filmRevealer) {
+                return;
+            }
+            filmHideConn.disconnect();
+            filmRevealer->set_reveal_child(true);
+            Glib::signal_idle().connect([filmBrowser]() {
+                filmBrowser->refreshThumbImages();
+                return false;
+            });
+        });
     }
 
     Gtk::Box* dockBox = Gtk::manage(new Gtk::Box(Gtk::ORIENTATION_VERTICAL));
@@ -1999,6 +2055,13 @@ bool EditorPanel::edgeCrossed(GdkEventCrossing* event, Gtk::Revealer* revealer, 
     return false;
 }
 
+void EditorPanel::hideFilmstrip()
+{
+    if (filmRevealer) {
+        filmRevealer->set_reveal_child(false);
+    }
+}
+
 void EditorPanel::showFileBrowser()
 {
     if (!fileRevealer) {
@@ -2132,6 +2195,9 @@ void EditorPanel::open (Thumbnail* tmb, rtengine::InitialImage* isrc)
 {
     if (fileRevealer) {
         fileRevealer->set_reveal_child (false);
+    }
+    if (filmRevealer) {
+        filmRevealer->set_reveal_child (false);
     }
 
     close();

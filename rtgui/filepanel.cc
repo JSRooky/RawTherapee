@@ -254,6 +254,10 @@ bool FilePanel::fileSelected (Thumbnail* thm)
         return false;
     }
 
+    if (parent->epanel) {
+        parent->epanel->hideFilmstrip();
+    }
+
     // Check if it's already open BEFORE loading the file
     if (App::get().options().tabbedUI && parent->selectEditorPanel(thm->getFileName())) {
         thm->decreaseRef();

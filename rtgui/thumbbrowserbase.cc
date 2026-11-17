@@ -556,8 +556,12 @@ void ThumbBrowserBase::internalAreaResized (Gtk::Allocation& req)
 {
 
     if (inW > 0 && inH > 0) {
-        configScrollBars ();
-        redraw ();
+        if (arrangement == TB_Vertical) {
+            arrangeFiles();
+        } else {
+            configScrollBars ();
+            redraw ();
+        }
     }
 }
 
@@ -1055,6 +1059,13 @@ void ThumbBrowserBase::Internal::get_preferred_height_vfunc (int &minimum_height
 
 void ThumbBrowserBase::Internal::get_preferred_width_vfunc (int &minimum_width, int &natural_width) const
 {
+    if (parent && parent->isVertical()) {
+        const int column = parent->getVerticalColumnWidth();
+        minimum_width = column;
+        natural_width = column;
+        return;
+    }
+
     minimum_width = RTScalable::scalePixelSize(200);
     natural_width = RTScalable::scalePixelSize(1000);
 }
